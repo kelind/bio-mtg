@@ -5,27 +5,6 @@
 
 '''
 
-def determine_sideboard(quantities, sideboard, sideboard_total):
-    '''
-        Figures out which cards are in the sideboard rather than the main deck. Takes a list of sideboard indicators and marks a "1" on each card slot that belongs on the sideboard, then returns the newly marked list.
-    '''
-
-    card_total = 0
-
-    for index, count in enumerate(reversed(quantities)):
-        sideboard[index] = 1
-        card_total += count
-
-        if card_total == sideboard_total:
-            break
-        elif card_total > sideboard_total:
-            print card_total, sideboard_total
-            print quantities
-            print 'Error: sideboard number incorrect.'
-            break
-        
-    return reversed(sideboard)
-
 def extract_bracket_info(tree):
     '''
         Takes the LXML tree of a tournament page and, if it's a "premier" tournament with a recorded bracket, parses out the matchups and game wins/losses for each player.
@@ -34,84 +13,93 @@ def extract_bracket_info(tree):
     import re
     from collections import OrderedDict
 
-    seeds = [node.tag for node in tree.xpath('id("content")//td[@class="small"]/*')]
-    records = tree.xpath('id("content")//td[@class="small"]/*[1]/text()')
-
-    bracket = zip(seeds, records)
-
     final_bracket = {}
 
-    # Now undergo the heinous process of untangling this mess
-    for tag, data in bracket:
-        if 'seed' in tag:
-            # New user to add to the dict
-            final_bracket[data] = {'seed': int(tag[-1]), 'wins': []}
-        else:
-            # It's matchup data!
-            if tag[-2] == 'v':
-                # This is a simple semifinal match
-                player1 = int(tag[-3])
-                player2 = int(tag[-1])
+    # We need to be able to look up seed from player name
+    # As well as player name from seed
+    inverse_bracket = {}
 
-                # Extract win/loss info
-                wins, losses = extract_win_loss(data)
+    # First, get the seeds for all players
+    seeds = tree[0].xpath('./tr//td[contains(@class, "seed")]')
 
-                # Get the username by chopping off win/loss stuff
-                username = data[:data.rfind(',')]
+    for seed in seeds:
+        seednum = seed.xpath('./@class')
+        username = seed.xpath('.//text()')
+        clean_seed = int(seednum[0][seednum[0].rfind('-') + 1 : ])
 
-                # Now just add the win data to the appropriate player
-                final_bracket[username]['wins'].append((player2, int(wins), int(losses)))
+        final_bracket[username[0]] = clean_seed
+        inverse_bracket[clean_seed] = username[0]
 
-            if tag[-3] == 'v':
-                # Quarterfinal match, harder to parse...
-                match1 = [int(tag[-5]), int(tag[-4])]
-                match2 = [int(tag[-2]), int(tag[-1])]
+    # Now, figure out the matchups and their results
+    matchups = tree[0].xpath('./tr//td[contains(@class, "winner")]')
 
-                # Extract win/loss info
-                wins, losses = extract_win_loss(data)
+    final_bracket['matchups'] = {}
 
-                # Get the username by chopping off win/loss stuff
-                username = data[:data.rfind(',')]
+    for match in matchups:
+        winner_data = match.xpath('.//text()')[0]
 
-                # Now, what seed is this username?
-                if final_bracket[username]['seed'] in match1:
-                    final_bracket[username]['wins'].append((match2, int(wins), int(losses)))
-                else:
-                    final_bracket[username]['wins'].append((match1, int(wins), int(losses)))
+        record = extract_win_loss(winner_data)
+        winner = winner_data[ : winner_data.rfind(',')]
 
-            if tag == 'champion':
-                # Okay, it's the "champion" tag
-                # Extract win/loss info
-                wins, losses = extract_win_loss(data)
+        print winner, record
 
-                # Get the username by chopping off win/loss stuff
-                username = data[:data.rfind(',')]
+        # As far as I'm aware, only the top eight are ever shown in the bracket
+        # (please please please don't let this assumption be wrong)
+        # We can then handle this case-switch style
+        match_pairing = match.xpath('./@class')[0]
 
-                final_bracket[username]['wins'].append(('champion', int(wins), int(losses)))
+        if '1v8' in match_pairing:
+            # Who won?
+            if final_bracket[winner] == 1:
+                final_bracket['matchups']['1v8'] = [inverse_bracket[1], inverse_bracket[8], int(record[0]), int(record[1])]
+            else:
+                final_bracket['matchups']['1v8'] = [inverse_bracket[8], inverse_bracket[1], int(record[0]), int(record[1])]
 
-    # Now, finally, go through and resolve outstanding matchups
-    #temp_bracket = {player: (final_bracket[player]['seed'], len(final_bracket[player]['wins'])) for player in final_bracket}
-    temp_bracket = {final_bracket[player]['seed']: len(final_bracket[player]['wins']) for player in final_bracket}
-    temp_bracket = OrderedDict(sorted(temp_bracket.items(), key=lambda t: t[1]))
+        elif '4v5' in match_pairing:
+            if final_bracket[winner] == 4:
+                final_bracket['matchups']['4v5'] = [inverse_bracket[4], inverse_bracket[5], int(record[0]), int(record[1])]
+            else:
+                final_bracket['matchups']['4v5'] = [inverse_bracket[5], inverse_bracket[4], int(record[0]), int(record[1])]
 
-    for seed in final_bracket:
-        for index, match in enumerate(final_bracket[seed]['wins']):
-            if type(match[0]) != type(1):
-                if len(match[0]) == 2:
-                    # Okay, need to resolve an ambiguous match outcome
-                    if temp_bracket[match[0][0]] > temp_bracket[match[0][1]]:
-                        final_winner = match[0][0]
-                    else:
-                        final_winner = match[0][1]
-                else:
-                    # Okay, we need to determine who the second-place winner was
-                    # TODO: Can this cause problems for champions appearing early in the order, destroying data used later?
-                    # Don't think so, but...
-                    final_winner = temp_bracket.popitem()[0]
-                    final_winner = temp_bracket.popitem()[0]
+        elif '3v6' in match_pairing:
+            if final_bracket[winner] == 3:
+                final_bracket['matchups']['3v6'] = [inverse_bracket[3], inverse_bracket[6], int(record[0]), int(record[1])]
+            else:
+                final_bracket['matchups']['3v6'] = [inverse_bracket[6], inverse_bracket[3], int(record[0]), int(record[1])]
 
-                # Now write over old value with final winner
-                final_bracket[seed]['wins'][index] = (final_winner, match[1], match[2])
+        elif '2v7' in match_pairing:
+            if final_bracket[winner] == 2:
+                final_bracket['matchups']['2v7'] = [inverse_bracket[2], inverse_bracket[7], int(record[0]), int(record[1])]
+            else:
+                final_bracket['matchups']['2v7'] = [inverse_bracket[7], inverse_bracket[2], int(record[0]), int(record[1])]
+
+        # Below this point, pairings are AMBIGUOUS
+        # due to the order of the code
+        elif '8v4' in match_pairing:
+            final_bracket['matchups']['18v45'] = [inverse_bracket[final_bracket[winner]], 0, int(record[0]), int(record[1])]
+
+        elif '7v3' in match_pairing:
+            final_bracket['matchups']['27v36'] = [inverse_bracket[final_bracket[winner]], 0, int(record[0]), int(record[1])]
+
+        elif 'champion' in match_pairing:
+            final_bracket['matchups']['champion'] = [inverse_bracket[final_bracket[winner]], 0, int(record[0]), int(record[1])]
+
+    # Now that we've gone through the whole tree
+    # assign the results of ambiguous matchups
+    if final_bracket[final_bracket['matchups']['18v45'][0]] in (1, 8):
+        final_bracket['matchups']['18v45'][1] = final_bracket['matchups']['4v5'][0]
+    else:
+        final_bracket['matchups']['18v45'][1] = final_bracket['matchups']['1v8'][0]
+
+    if final_bracket[final_bracket['matchups']['27v36'][0]] in (2, 7):
+        final_bracket['matchups']['27v36'][1] = final_bracket['matchups']['3v6'][0]
+    else:
+        final_bracket['matchups']['27v36'][1] = final_bracket['matchups']['2v7'][0]
+
+    if final_bracket[final_bracket['matchups']['champion'][0]] in (1, 4, 5, 8):
+        final_bracket['matchups']['champion'][1] = final_bracket['matchups']['27v36'][0]
+    else:
+        final_bracket['matchups']['champion'][1] = final_bracket['matchups']['18v45'][0]
 
     return final_bracket
 
@@ -121,32 +109,36 @@ def extract_event_info(tree):
     '''
 
     import re
+    import datetime
 
     event_data = {}
 
     #winlossre = re.compile(r'\((\d+)-(\d+)\)')
-    geninfore = re.compile(r'(?P<format>.+?) (?P<metagame>.+?) Event #(?P<eventid>\d+) on (?P<date>.+?) in')
+    geninfore = re.compile(r'(?P<format>.+?) (?P<metagame>.+?) #(?P<eventid>\d+) on (?P<date>.+)')
 
-
+    decks = tree.xpath('id("content-detail-page-of-an-article")//div[@class="deck-group"]')
+    
     # Get overall tourney information
-    raw_info = tree.xpath('id("centerColumn")//div[@class="body regular"]/p/text()')
-    raw_infomatch = geninfore.match(raw_info[0])
+    cleaned_byline = decks[0].xpath('span/h5/text()')[0].strip()
+    raw_infomatch = geninfore.match(cleaned_byline)
 
     event_data['format'] = raw_infomatch.group('format')
     event_data['metagame'] = raw_infomatch.group('metagame')
     event_data['eventid'] = raw_infomatch.group('eventid')
-    event_data['eventdate'] = raw_infomatch.group('date')
+    event_data['eventdate'] = datetime.datetime.strptime(raw_infomatch.group('date'), '%m/%d/%Y')
 
-    event_data['players'] = {}
-    decks = tree.xpath('id("centerColumn")//div[@class="deck"]')
+    print event_data
 
     # If this is a "premier" event, extract bracket info
     #bracket = extract_bracket_info(tree)
 
+    event_data['players'] = {}
+
+    # Now info on individual decks
     for deck in decks:
 
         # Get pilot and win/loss info
-        maininfo = deck.xpath('.//heading/text()')
+        maininfo = deck.xpath('span/h4/text()')
 
         username = maininfo[0][ : maininfo[0].rfind('(') - 1]
         event_data['players'][username] = {}
@@ -160,67 +152,79 @@ def extract_event_info(tree):
             event_data['players'][username]['wins'] = int(wins)
             event_data['players'][username]['losses'] = int(losses)
         except TypeError:
-            # Get bracket info instead
-            event_data['bracket'] = extract_bracket_info(tree)
+            # This is a tournament with bracket information
+            # Win/loss is not directly given for each player
+            # We handle bracket data later
+            # (so we don't do it multiple times unnecessarily)
+            pass
 
-        event_data['players'][username]['deck'] = []
+        print username, event_data['players'][username]
 
-        # Get card content info
-        cards = deck.xpath('.//a[@class="nodec"]/text()')
+        # Get maindeck info
+        main_cards = deck.xpath('.//div[@class="sorted-by-overview-container sortedContainer"]//span[@class="card-name"]/a/text()')
+        main_quantities = deck.xpath('.//div[@class="sorted-by-overview-container sortedContainer"]//span[@class="card-count"]/text()')
+        main_deckinfo = [(card, quantity, 0) for card, quantity in zip(main_cards, main_quantities)]
 
-        quantities = deck.xpath('.//table//td[@valign="top"]/text()[normalize-space()]')
+        # Get sideboard
+        sideboard_cards = deck.xpath('.//div[@class="sorted-by-sideboard-container  clearfix element"]//span[@class="card-name"]/a/text()')
+        sideboard_quantities = deck.xpath('.//div[@class="sorted-by-sideboard-container  clearfix element"]//span[@class="card-count"]/text()')
+        sideboard_deckinfo = [(card, quantity, 1) for card, quantity in zip(sideboard_cards, sideboard_quantities)]
 
-        quantities = [int(num.strip()) for num in quantities]
+        event_data['players'][username]['deck'] = main_deckinfo + sideboard_deckinfo
 
-        # Generate a list of sideboard markers
-        sideboard = [0] * len(cards)
+    # Get player ranking data
+    standings = tree.xpath('.//table[@class="sticky-enabled"]/tbody/tr')
 
-        # The last X cards are in the sideboard
-        totaltext = deck.xpath('.//table//td[@valign="top"]//span[@class="decktotals"]/text()')
-        sideboard_text = totaltext[-1]
-        sideboard_count = int(sideboard_text.split()[0])
-
-        #print username
-        if len(cards) != len(quantities):
-            # This may be one of those weird decks
-            # Where the sideboard is off by itself...
-            # ...in a broken div. =/
-            sideboard_check = deck.xpath('.//table//td[@valign="top"]/div/text()[normalize-space()]')
-            if len(sideboard_check) + len(quantities) == len(cards):
-                # Problem solved!
-                quantities = quantities + [int(num.strip()) for num in sideboard_check]
-            else:
-                print 'Houston, we have a problem...'
-
-        sideboard = determine_sideboard(quantities, sideboard, sideboard_count)
-
-        event_data['players'][username]['deck'] = zip(cards, quantities, sideboard)
-
-    # Get player win/loss and rank data
-    standings = tree.xpath('id("centerColumn")//table[@width="90%"]/tr')
+    # Get bracket data if present
+    bracket = tree.xpath('id("content-detail-page-of-an-article")//div[@class="wiz-bracket"]/table/tbody')
+    event_data['bracket'] = extract_bracket_info(bracket)
+    total_rounds = 0
 
     for entry in standings:
-        player = entry.xpath('td/text()')
+        player = entry.xpath('.//td/text()')
 
         try:
+            if 'bracket' in event_data:
+                # Win/loss records are not posted!
+                # Determine from standings instead
+                # As far as I can tell there's no way to draw
+                # so this is fairly straightforward...
+                player_points = int(player[2])
+
+                if not total_rounds:
+                    # Thankfully, standings are always ordered
+                    # so the first place is on top!
+                    # Number of rounds = winner's points / 3
+                    total_rounds = player_points / 3
+
+                event_data['players'][player[1]]['wins'] = player_points / 3
+                event_data['players'][player[1]]['losses'] = total_rounds - player_points / 3
+                print player[1], event_data['players'][player[1]]['wins']
+                print player[1], event_data['players'][player[1]]['losses']
+
             event_data['players'][player[1]]['rank'] = int(player[0])
             event_data['players'][player[1]]['points'] = int(player[2])
             event_data['players'][player[1]]['omwp'] = float(player[3])
             event_data['players'][player[1]]['gwp'] = float(player[4])
             event_data['players'][player[1]]['ogwp'] = float(player[5])
+            #print player[1], event_data['players'][player[1]]
 
         except ValueError:
+            print 'valueerror'
             continue
 
         except KeyError:
             if len(standings) != len(event_data['players']):
                 # For whatever reason, not all players have decks listed
+                # We only want to store data for players where we have decklists
                 continue
             else:
-                print 'Houston, we have a problem in the standings area'
+                print 'Unrecognized player data in standings'
                 break
 
+    '''
     return event_data
+    '''
 
 def extract_win_loss(str):
     '''
